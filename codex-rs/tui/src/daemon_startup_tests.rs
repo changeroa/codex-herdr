@@ -6,6 +6,76 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 #[test]
+fn reasoning_effort_overrides_allow_daemon_only_for_known_string_values() {
+    for (value, eligible) in [
+        ("'none'", true),
+        ("'minimal'", true),
+        ("'low'", true),
+        ("'medium'", true),
+        ("'high'", true),
+        ("'xhigh'", true),
+        ("'max'", true),
+        ("'ultra'", true),
+        ("'persistent'", true),
+        ("''", false),
+        ("'unknown'", false),
+        ("'Medium'", false),
+        ("true", false),
+        ("3", false),
+        ("['medium']", false),
+        ("{effort='medium'}", false),
+    ] {
+        let overrides = codex_utils_cli::CliConfigOverrides {
+            raw_overrides: vec![format!("model_reasoning_effort={value}")],
+        }
+        .parse_overrides()
+        .unwrap();
+        assert_eq!(
+            daemon_startup::config_exclusion(
+                &overrides,
+                &LoaderOverrides::default(),
+                /*strict_config*/ false,
+                /*bypass_hook_trust*/ false,
+            )
+            .is_none(),
+            eligible,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn reasoning_effort_override_does_not_allow_unrelated_config() {
+    for (other_override, eligible) in [
+        ("features.worktrees=true", true),
+        ("tui.fullscreen_transcript=true", true),
+        ("model='test'", false),
+        ("web_search='live'", false),
+        ("model_reasoning_effort.extra='medium'", false),
+    ] {
+        let overrides = codex_utils_cli::CliConfigOverrides {
+            raw_overrides: vec![
+                "model_reasoning_effort=medium".to_string(),
+                other_override.to_string(),
+            ],
+        }
+        .parse_overrides()
+        .unwrap();
+        assert_eq!(
+            daemon_startup::config_exclusion(
+                &overrides,
+                &LoaderOverrides::default(),
+                /*strict_config*/ false,
+                /*bypass_hook_trust*/ false,
+            )
+            .is_none(),
+            eligible,
+            "{other_override}"
+        );
+    }
+}
+
+#[test]
 fn feature_overrides_allow_daemon_without_allowing_arbitrary_config() {
     for (raw, eligible) in [
         ("features.app_server_websocket_compression=true", true),
