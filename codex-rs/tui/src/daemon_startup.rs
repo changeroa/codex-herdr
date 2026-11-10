@@ -12,6 +12,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ExperimentalFeatureStage;
 use codex_app_server_protocol::RequestId;
+use codex_protocol::openai_models::ReasoningEffort;
 use std::collections::BTreeMap;
 
 pub(super) const FAILURE_HINT: &str = "To work without the background server, rerun the same command with --no-daemon (including resume or fork and its arguments).";
@@ -94,6 +95,11 @@ pub(super) fn config_exclusion(
     if !cli_kv_overrides
         .iter()
         .all(|(key, value)| match key.as_str() {
+            // Named effort overrides are carried by the per-thread request.
+            "model_reasoning_effort" => value
+                .clone()
+                .try_into::<ReasoningEffort>()
+                .is_ok_and(|effort| !matches!(effort, ReasoningEffort::Custom(_))),
             "suppress_unstable_features_warning" | "tui.fullscreen_transcript" => value.is_bool(),
             "tui" => value.as_table().is_some_and(|tui| {
                 tui.len() == 1
