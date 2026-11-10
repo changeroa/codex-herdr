@@ -1285,6 +1285,7 @@ See the Codex keymap documentation for supported actions and examples."
         let mut backends =
             super::backend_sessions::BackendSessions::from_initial(app_server, other_backends);
 
+        let herdr_session = crate::herdr_session::HerdrSessionReporter::from_env();
         let exit_reason_result = if let Some(exit_reason) = pre_loop_exit_reason {
             Ok(exit_reason)
         } else {
@@ -1429,6 +1430,9 @@ See the Codex keymap documentation for supported actions and examples."
                     .chat_widget
                     .rate_limit_refresh_interval()
                     .and_then(|interval| app.rate_limit_refresh_state.poll_deadline(interval));
+                if let Some(reporter) = &herdr_session {
+                    reporter.select(app.current_displayed_thread_id().map(|id| id.to_string()));
+                }
                 let control = select! {
                     result = async {
                         match app.daemon_restart.as_mut() {
@@ -1699,6 +1703,9 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         };
+        if let Some(reporter) = herdr_session {
+            reporter.shutdown().await;
+        }
         // Let the pending terminal poll unwind while the app server shuts down.
         tui.pause_events();
         app.chat_widget.mention_usage_mut().flush().await;
