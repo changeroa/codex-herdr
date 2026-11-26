@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Entry point for the local Herdr TUI package; the native CLI lives in native/bin."""
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import time
+import uuid
+
+
+# Administrative and noninteractive commands use the original CLI environment.
+OTHER_COMMANDS = frozenset(
+    "exec e review login logout mcp mcp-server plugin app-server remote-control app "
+    "completion update doctor sandbox debug apply a queue archive delete migrate-rollouts "
+    "migrate-nfs-db unarchive cloud cloud-tasks exec-server features help execpolicy tcp-tunnel responses-api-proxy stdio-to-uds".split()
+)
+
+
+def interactive_launch(args):
+    value_options = {"-c", "--config", "-m", "--model", "-p", "--profile", "-C", "--cd",
+                     "-i", "--image", "-a", "--ask-for-approval", "-s", "--sandbox",
+                     "--enable", "--disable", "--add-dir", "--local-provider",
+                     "--remote-auth-token-env", "--permissions-profile"}
+    tokens = iter(args)
+    positional = None
+    for arg in tokens:
+        if arg == "--":
+            break
+        if arg in value_options:
+            next(tokens, None)
+        elif arg in {"-V", "--version", "-h", "--help", "--remote"} or arg.startswith("--remote="):
+            return False
+        elif not arg.startswith("-") and positional is None:
+            positional = arg
+    return positional not in OTHER_COMMANDS
+
+
+def request(endpoint, method, params, deadline):
+    request_id = uuid.uuid4().hex
+    packet = {"id": request_id, "method": method, "params": params}
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.settimeout(max(0.001, deadline - time.monotonic()))
+        peer.connect(endpoint)
+        peer.sendall(json.dumps(packet).encode() + b"\n")
+        with peer.makefile("rb") as reader:
+            line = reader.readline(2 * 1024 * 1024)
+    reply = json.loads(line)
+    if reply.get("id") != request_id or "error" in reply:
+        raise ValueError("Herdr could not verify this request")
+    return reply["result"]
+
+
+def pane_for_process(call, hint, pid):
+    def owns(pane):
+        pane_id = pane.get("pane_id")
+        if not all(isinstance(pane.get(key), str) and pane[key]
+                   for key in ("pane_id", "tab_id", "workspace_id", "terminal_id")):
+            return False
+        info = call("pane.process_info", {"pane_id": pane_id})["process_info"]
+        return (info.get("pane_id") == pane_id and
+                any(proc.get("pid") == pid for proc in info.get("foreground_processes", [])))
+
+    # A shared app server can have an obsolete hint. Only our foreground PID
+    # on the socket inherited from Herdr establishes the launch terminal.
+    if hint:
+        try:
+            pane = call("pane.current", {"caller_pane_id": hint})["pane"]
+            if pane["pane_id"] == hint and owns(pane):
+                return pane
+        except (KeyError, ValueError):
+            pass
+    matches = [pane for pane in call("pane.list", {})["panes"] if owns(pane)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def disabled_hook_options():
+    # Let the TUI run while preventing the daemon's old hint from registering another pane.
+    print("Herdr could not verify the foreground Codex pane; session registration is disabled.",
+          file=sys.stderr)
+    return ["-c", 'shell_environment_policy.set.HERDR_ENV="0"']
+
+
+def launch_options(args):
+    endpoint = os.environ.get("HERDR_SOCKET_PATH")
+    if (os.environ.get("HERDR_ENV") != "1" or not endpoint or not sys.stdin.isatty()
+            or not interactive_launch(args) or os.tcgetpgrp(0) != os.getpgrp()):
+        return []
+    deadline = time.monotonic() + 2.0
+
+    def call(method, params):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Herdr lookup timed out")
+        return request(endpoint, method, params, deadline)
+
+    pane = pane_for_process(call, os.environ.get("HERDR_PANE_ID"), os.getpid())
+    if pane is None:
+        return disabled_hook_options()
+    context = {"HERDR_ENV": "1", "HERDR_SOCKET_PATH": endpoint, "HERDR_PANE_ID": pane["pane_id"],
+               "HERDR_TAB_ID": pane["tab_id"], "HERDR_WORKSPACE_ID": pane["workspace_id"]}
+    options = []
+    for key, value in context.items():
+        options.extend(["-c", f"shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}"])
+    return options
+
+
+if __name__ == "__main__":
+    native = Path(__file__).resolve().parents[1] / "native" / "bin" / "codex"
+    try:
+        options = launch_options(sys.argv[1:])
+    except (OSError, ValueError, KeyError, TypeError):
+        options = disabled_hook_options()
+    os.execv(native, [str(native), *options, *sys.argv[1:]])
